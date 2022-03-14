@@ -141,36 +141,19 @@ class InitSettingsSource:
         return f'InitSettingsSource(init_kwargs={self.init_kwargs!r})'
 
 
-class EnvSettingsSource:
-    __slots__ = ('env_file', 'env_file_encoding', 'env_nested_delimiter')
+class EnvSettingsSourceBase:
+    __slots__ = ('env_nested_delimiter')
 
     def __init__(
-        self, env_file: Optional[StrPath], env_file_encoding: Optional[str], env_nested_delimiter: Optional[str] = None
+        self, env_nested_delimiter: Optional[str] = None
     ):
-        self.env_file: Optional[StrPath] = env_file
-        self.env_file_encoding: Optional[str] = env_file_encoding
         self.env_nested_delimiter: Optional[str] = env_nested_delimiter
 
-    def __call__(self, settings: BaseSettings) -> Dict[str, Any]:  # noqa C901
+    def _process_vars(self, settings: BaseSettings, env_vars: Dict[str, str]) -> Dict[str, Any]:  # noqa C901
         """
         Build environment variables suitable for passing to the Model.
         """
         d: Dict[str, Any] = {}
-
-        if settings.__config__.case_sensitive:
-            env_vars: Mapping[str, Optional[str]] = os.environ
-        else:
-            env_vars = {k.lower(): v for k, v in os.environ.items()}
-
-        if self.env_file is not None:
-            env_path = Path(self.env_file).expanduser()
-            if env_path.is_file():
-                env_vars = {
-                    **read_env_file(
-                        env_path, encoding=self.env_file_encoding, case_sensitive=settings.__config__.case_sensitive
-                    ),
-                    **env_vars,
-                }
 
         for field in settings.__fields__.values():
             env_val: Optional[str] = None
@@ -235,6 +218,39 @@ class EnvSettingsSource:
             env_var[last_key] = env_val
 
         return result
+
+class EnvSettingsSource(EnvSettingsSourceBase):
+    __slots__ = ('env_file', 'env_file_encoding')
+
+    def __init__(
+        self, env_file: Optional[StrPath], env_file_encoding: Optional[str], env_nested_delimiter: Optional[str] = None
+    ):
+        super().__init__(env_nested_delimiter)
+        self.env_file: Optional[StrPath] = env_file
+        self.env_file_encoding: Optional[str] = env_file_encoding
+
+    def __call__(self, settings: BaseSettings) -> Dict[str, Any]:  # noqa C901
+        """
+        Build environment variables suitable for passing to the Model.
+        """
+        d: Dict[str, Any] = {}
+
+        if settings.__config__.case_sensitive:
+            env_vars: Mapping[str, Optional[str]] = os.environ
+        else:
+            env_vars = {k.lower(): v for k, v in os.environ.items()}
+
+        if self.env_file is not None:
+            env_path = Path(self.env_file).expanduser()
+            if env_path.is_file():
+                env_vars = {
+                    **read_env_file(
+                        env_path, encoding=self.env_file_encoding, case_sensitive=settings.__config__.case_sensitive
+                    ),
+                    **env_vars,
+                }
+
+        return self._process_vars(settings,env_vars)
 
     def __repr__(self) -> str:
         return (
