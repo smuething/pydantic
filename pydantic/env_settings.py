@@ -6,7 +6,7 @@ from typing import AbstractSet, Any, Callable, ClassVar, Dict, List, Mapping, Op
 from .config import BaseConfig, Extra
 from .fields import ModelField
 from .main import BaseModel
-from .typing import StrPath, display_as_type, get_origin, is_union
+from .typing import StrPath, display_as_type, get_origin, is_union, Iterable
 from .utils import deep_update, path_type, sequence_like
 
 env_file_sentinel = str(object())
@@ -64,7 +64,12 @@ class BaseSettings(BaseModel):
                 _env_nested_delimiter if _env_nested_delimiter is not None else self.__config__.env_nested_delimiter
             ),
         )
-        file_secret_settings = SecretsSettingsSource(secrets_dir=_secrets_dir or self.__config__.secrets_dir)
+        file_secret_settings = SecretsSettingsSource(
+            secrets_dir=_secrets_dir or self.__config__.secrets_dir,
+            env_nested_delimiter=(
+                _env_nested_delimiter if _env_nested_delimiter is not None else self.__config__.env_nested_delimiter
+            ),
+        )
         # Provide a hook to set built-in sources priority and add / remove sources
         sources = self.__config__.customise_sources(
             init_settings=init_settings, env_settings=env_settings, file_secret_settings=file_secret_settings
@@ -259,17 +264,18 @@ class EnvSettingsSource(EnvSettingsSourceBase):
         )
 
 
-class SecretsSettingsSource:
-    __slots__ = ('secrets_dir',)
+class SecretsSettingsSource(EnvSettingsSourceBase):
+    __slots__ = ('secrets_dir')
 
-    def __init__(self, secrets_dir: Optional[StrPath]):
+    def __init__(self, secrets_dir: Optional[StrPath], env_nested_delimiter: Optional[str] = None):
+        super().__init__(env_nested_delimiter)
         self.secrets_dir: Optional[StrPath] = secrets_dir
 
     def __call__(self, settings: BaseSettings) -> Dict[str, Any]:
         """
         Build fields from "secrets" files.
         """
-        secrets: Dict[str, Optional[str]] = {}
+        secrets: Dict[str, Any] = {}
 
         if self.secrets_dir is None:
             return secrets
@@ -282,29 +288,13 @@ class SecretsSettingsSource:
 
         if not secrets_path.is_dir():
             raise SettingsError(f'secrets_dir must reference a directory, not a {path_type(secrets_path)}')
+            
+        env_vars: Mapping[str, str] = dict(s for s in try_read_secrets(secrets_path.iterdir()))
 
-        for field in settings.__fields__.values():
-            for env_name in field.field_info.extra['env_names']:
-                path = secrets_path / env_name
-                if path.is_file():
-                    secret_value = path.read_text().strip()
-                    if field.is_complex():
-                        try:
-                            secret_value = settings.__config__.json_loads(secret_value)
-                        except ValueError as e:
-                            raise SettingsError(f'error parsing JSON for "{env_name}"') from e
-
-                    secrets[field.alias] = secret_value
-                elif path.exists():
-                    warnings.warn(
-                        f'attempted to load secret file "{path}" but found a {path_type(path)} instead.',
-                        stacklevel=4,
-                    )
-
-        return secrets
+        return self._process_vars(settings,env_vars)
 
     def __repr__(self) -> str:
-        return f'SecretsSettingsSource(secrets_dir={self.secrets_dir!r})'
+        return f'SecretsSettingsSource(secrets_dir={self.secrets_dir!r}, env_nested_delimiter={self.env_nested_delimiter!r})'
 
 
 def read_env_file(
@@ -320,3 +310,12 @@ def read_env_file(
         return {k.lower(): v for k, v in file_vars.items()}
     else:
         return file_vars
+
+
+def try_read_secrets(secrets : Iterable[Path]):
+    for secret in secrets:
+        if secret.is_file():
+            try:
+                yield secret.name,secret.read_text().strip()
+            except PermissionError:
+                warnings.warn(f'Insufficient permissions to read secret "{secret.name}"')
